@@ -9,48 +9,48 @@ import (
 	"syscall"
 )
 
-// Request body JSON 구조체
+// Request body JSON structure
 type RequestPayload struct {
 	Path string   `json:"path"`
 	Args []string `json:"args"`
 }
 
-// Response body JSON 구조체
+// Response body JSON structure
 type ResponsePayload struct {
 	ParentPID int `json:"parent_pid"`
 	ChildPID  int `json:"child_pid"`
 }
 
 func netnsHandler(w http.ResponseWriter, r *http.Request) {
-	// POST 메서드만 허용
+	// POST method only
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// JSON Request Body 파싱
+	// JSON Request Body parsing
 	var req RequestPayload
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 		return
 	}
 
-	// 실행할 명령어 객체 생성
+	// CMD object generation
 	cmd := exec.Command(req.Path, req.Args...)
 
-	// 1. 자식 프로세스를 새로운 Network Namespace(CLONE_NEWNET)에서 실행
+	// 1. child process conducting in a new Network Namespace(CLONE_NEWNET)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWNET,
 	}
 
-	// 프로세스 시작 (완료될 때까지 기다리지 않음)
+	// process start (no waiting for completion)
 	if err := cmd.Start(); err != nil {
 		http.Error(w, "Failed to start process: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 좀비 프로세스 방지를 위한 Wait 처리 (비동기)
-	// API 응답을 먼저 보내야 하므로 goroutine을 사용하여 백그라운드에서 대기합니다.
+	// preventing zombie process with waiting in background
+	// goroutine for API response first and then waiting for child process to exit
 	go func() {
 		err := cmd.Wait()
 		if err != nil {
@@ -60,13 +60,13 @@ func netnsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Response JSON 생성
+	// Response JSON structure generation
 	res := ResponsePayload{
 		ParentPID: os.Getpid(),
 		ChildPID:  cmd.Process.Pid,
 	}
 
-	// 응답 반환
+	// Return response with JSON format
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(res)
