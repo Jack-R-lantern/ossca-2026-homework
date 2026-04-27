@@ -35,6 +35,11 @@ func netnsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Path == "/bin/sh" && len(req.Args) == 2 && req.Args[0] == "-c"  {
+		req.Args[1] = req.Args[1] + "; true" // for preventing sh terminating 
+
+	}
+
 	// CMD object generation
 	cmd := exec.Command(req.Path, req.Args...)
 
