@@ -1,2 +1,2 @@
 build:
-	go build -o app main.go
+	go build -o app .
