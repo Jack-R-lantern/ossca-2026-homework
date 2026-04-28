@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -30,9 +29,9 @@ func HandleUnshareNetns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Request 조건 검증
-	if err := validateRequest(req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+	// Request path 절대 경로 확인
+	if !filepath.IsAbs(req.Path) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "path must be an absolute path"})
 		return
 	}
 
@@ -74,24 +73,4 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-// vaildateRequest는 요청 값을 조건으로 검증
-// 아래의 조건을 구현:
-//   - path는 실행 파일의 절대 경로여야 한다.
-//   - shell command string 형태는 허용하지 않는다.
-func validateRequest(req unshareRequest) error {
-	// 절대 경로만 사용
-	if !filepath.IsAbs(req.Path) {
-		return errors.New("path must be an absolute path")
-	}
-
-	// shell string 방지
-	// ex) /bin/sh -c 'sleep 30'
-	base := filepath.Base(req.Path)
-	if (base == "sh" || base == "bash" || base == "zsh") && len(req.Args) > 0 && req.Args[0] == "-c" {
-		return errors.New("shell command string is not allowed")
-	}
-
-	return nil
 }
