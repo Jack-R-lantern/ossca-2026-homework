@@ -1,2 +1,2 @@
 build:
-	go build -o SeoGeonhyuk main.go
+	go build -o app main.go
