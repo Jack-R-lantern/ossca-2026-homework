@@ -45,7 +45,7 @@ func handleNetNs(w http.ResponseWriter, r *http.Request) {
 
 	// 자식 프로세스만 새 network namespace에서 시작
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags: syscall.CLONE_NEWNET, // fork() 할 때 clone(CLONE_NEWNET) syscall을 호출
+			Unshareflags: syscall.CLONE_NEWNET, // 자식이 exec하기 직전에 unshare() syscall을 호출
 	}
 
 	// 자식 프로세스 실행
