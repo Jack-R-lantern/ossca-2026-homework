@@ -49,7 +49,8 @@ func handleUnshareNetns(w http.ResponseWriter, r *http.Request) {
 
 	cmd := exec.Command(req.Path, req.Args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWNET,
+		// Unshareflags: 부모와 자식이 같은 속성인데 자식만 부모 netns 분리
+		Unshareflags: syscall.CLONE_NEWNET,
 	}
 
 	if err := cmd.Start(); err != nil {
