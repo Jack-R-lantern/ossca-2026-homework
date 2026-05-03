@@ -9,7 +9,7 @@ run: build
 test:
 	curl -X POST http://localhost:8080/unshare/netns \
 		-H "Content-Type: application/json" \
-		-d '{"path": "/bin/sleep", "args": ["sleep", "30"]}'
+		-d '{"path": "/bin/sleep", "args": ["30"]}'
 
 clean:
 	rm -f app
