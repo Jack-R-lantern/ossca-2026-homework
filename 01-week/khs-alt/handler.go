@@ -32,12 +32,13 @@ func UserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// wait child process
-	var wstatus syscall.WaitStatus
-	_, err = syscall.Wait4(output.ChildPid, &wstatus, 0, nil)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("wait4 error: %v", err), http.StatusInternalServerError)
-		return
-	}
+	go func() {
+		var wstatus syscall.WaitStatus
+		_, err := syscall.Wait4(output.ChildPid, &wstatus, 0, nil)
+		if err != nil {
+			fmt.Printf("wait4 error: %v\n", err)
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
