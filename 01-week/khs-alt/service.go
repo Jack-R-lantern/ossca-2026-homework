@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"runtime"
 	"syscall"
@@ -11,13 +10,17 @@ import (
 
 func MakeProcess(path string, args []string) (*Output, error) {
 	runtime.LockOSThread()
-	// 고루틴이 하나의 os thread만 점유하도록 하기 위해 runtime.UnlockOSThread() 호출을 안함.
-	// defer runtime.UnlockOSThread()
+	defer runtime.UnlockOSThread()
 
 	argv := append([]string{path}, args...)
-
 	parentPid := os.Getpid()
-	err := unix.Unshare(unix.CLONE_NEWNET)
+	f, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	err = unix.Unshare(unix.CLONE_NEWNET)
 	if err != nil {
 		return nil, err
 	}
@@ -25,9 +28,10 @@ func MakeProcess(path string, args []string) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	tid := syscall.Gettid()
-	fmt.Printf("thread id: %d\n", tid)
-
+	err = unix.Setns(int(f.Fd()), unix.CLONE_NEWNET) // unix.Setns(int(f.Fd()), 0)도 가능, 안전을 위해 동일하게 명시해주는 것이 좋음
+	if err != nil {
+		return nil, err
+	}
 	output := Output{
 		ParentPid: parentPid,
 		ChildPid:  childPid,
