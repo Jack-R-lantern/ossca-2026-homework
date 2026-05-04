@@ -14,11 +14,11 @@ func MakeProcess(path string, args []string) (*Output, error) {
 
 	argv := append([]string{path}, args...)
 	parentPid := os.Getpid()
-	f, err := os.Open("/proc/self/ns/net")
+	ParentNetNSFd, err := os.Open("/proc/self/ns/net")
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer ParentNetNSFd.Close()
 
 	err = unix.Unshare(unix.CLONE_NEWNET)
 	if err != nil {
@@ -28,7 +28,7 @@ func MakeProcess(path string, args []string) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = unix.Setns(int(f.Fd()), unix.CLONE_NEWNET) // unix.Setns(int(f.Fd()), 0)도 가능, 안전을 위해 동일하게 명시해주는 것이 좋음
+	err = unix.Setns(int(ParentNetNSFd.Fd()), unix.CLONE_NEWNET) // unix.Setns(int(f.Fd()), 0)도 가능, 안전을 위해 동일하게 명시해주는 것이 좋음
 	if err != nil {
 		return nil, err
 	}
