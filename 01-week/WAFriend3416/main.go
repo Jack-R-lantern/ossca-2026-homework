@@ -20,6 +20,8 @@ type CommandStartResult struct {
 	Error    string
 }
 
+const sysSetns = 308
+
 func main() {
 	http.HandleFunc("/unshare/netns", func(w http.ResponseWriter, r *http.Request) {
 		var reqData CommandRequest
@@ -84,7 +86,7 @@ func main() {
 }
 
 func setns(fd int, nstype int) error {
-	_, _, errno := syscall.RawSyscall(syscall.SYS_SETNS, uintptr(fd), uintptr(nstype), 0)
+	_, _, errno := syscall.RawSyscall(sysSetns, uintptr(fd), uintptr(nstype), 0)
 	if errno != 0 {
 		return errno
 	}
