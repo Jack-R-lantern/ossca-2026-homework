@@ -31,10 +31,15 @@ func main() {
 
 		go func() {
 			runtime.LockOSThread()
-			// 새 netns로 들어간 OS thread가 Go scheduler에 재사용되지 않도록 Unlock하지 않는다.
 
-			err := syscall.Unshare(syscall.CLONE_NEWNET)
-			// 해당 코드 이후에 /proc 쪽 상황이 어떻게 변하는 지를 확인해봐야 하려나.
+			origNS, err := os.Open(fmt.Sprintf("/proc/self/task/%d/ns/net", syscall.Gettid()))
+			if err != nil {
+				resultCh <- CommandStartResult{Error: "open original netns failed"}
+				return
+			}
+			defer origNS.Close()
+
+			err = syscall.Unshare(syscall.CLONE_NEWNET)
 			if err != nil {
 				resultCh <- CommandStartResult{Error: "unshare failed"}
 				return
@@ -43,6 +48,7 @@ func main() {
 			cmd := exec.Command(path, args...)
 			err = cmd.Start()
 			if err != nil {
+				_ = setns(int(origNS.Fd()), syscall.CLONE_NEWNET)
 				resultCh <- CommandStartResult{Error: "cmd start failed"}
 				return
 			}
@@ -50,6 +56,11 @@ func main() {
 			go func() {
 				_ = cmd.Wait()
 			}()
+
+			if err := setns(int(origNS.Fd()), syscall.CLONE_NEWNET); err != nil {
+				resultCh <- CommandStartResult{Error: "setns failed"}
+				return
+			}
 
 			resultCh <- CommandStartResult{ChildPID: cmd.Process.Pid}
 		}()
@@ -70,4 +81,12 @@ func main() {
 
 	fmt.Println("http://localhost:8080 에서 대기 중... 💣")
 	http.ListenAndServe(":8080", nil)
+}
+
+func setns(fd int, nstype int) error {
+	_, _, errno := syscall.RawSyscall(syscall.SYS_SETNS, uintptr(fd), uintptr(nstype), 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
