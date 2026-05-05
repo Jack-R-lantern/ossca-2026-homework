@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"syscall"
 )
 
@@ -14,33 +15,56 @@ type CommandRequest struct {
 	Args []string `json:"args"`
 }
 
+type CommandStartResult struct {
+	ChildPID int
+	Error    string
+}
+
 func main() {
 	http.HandleFunc("/unshare/netns", func(w http.ResponseWriter, r *http.Request) {
 		var reqData CommandRequest
 		json.NewDecoder(r.Body).Decode(&reqData)
 
-		err := syscall.Unshare(syscall.CLONE_NEWNET)
-		if err != nil {
-			http.Error(w, `{"error": "unshare failed"}`, http.StatusInternalServerError)
-			return
-		}
-
-		cmd := exec.Command(reqData.Path, reqData.Args...)
-		err = cmd.Start()
-		if err != nil {
-			http.Error(w, `{"error": "cmd start failed"}`, http.StatusInternalServerError)
-			return
-		}
+		resultCh := make(chan CommandStartResult, 1)
+		path := reqData.Path
+		args := append([]string(nil), reqData.Args...)
 
 		go func() {
-			_ = cmd.Wait()
+			runtime.LockOSThread()
+			// 새 netns로 들어간 OS thread가 Go scheduler에 재사용되지 않도록 Unlock하지 않는다.
+
+			err := syscall.Unshare(syscall.CLONE_NEWNET)
+			// 해당 코드 이후에 /proc 쪽 상황이 어떻게 변하는 지를 확인해봐야 하려나.
+			if err != nil {
+				resultCh <- CommandStartResult{Error: "unshare failed"}
+				return
+			}
+
+			cmd := exec.Command(path, args...)
+			err = cmd.Start()
+			if err != nil {
+				resultCh <- CommandStartResult{Error: "cmd start failed"}
+				return
+			}
+
+			go func() {
+				_ = cmd.Wait()
+			}()
+
+			resultCh <- CommandStartResult{ChildPID: cmd.Process.Pid}
 		}()
+
+		result := <-resultCh
+		if result.Error != "" {
+			http.Error(w, `{"error": "`+result.Error+`"}`, http.StatusInternalServerError)
+			return
+		}
 
 		// 응답
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]int{
 			"parent_pid": os.Getpid(),
-			"child_pid":  cmd.Process.Pid,
+			"child_pid":  result.ChildPID,
 		})
 	})
 
