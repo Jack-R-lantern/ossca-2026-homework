@@ -1,0 +1,226 @@
+name: 02-week
+
+on:
+  pull_request:
+    paths:
+      - '02-week/**'
+  workflow_dispatch:
+    inputs:
+      submitter:
+        description: 'Submitter GitHub login under 02-week/'
+        required: true
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 02-week/00-checker/go.mod
+
+      - name: resolve submitter directory
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SUBMITTER="${{ github.event.pull_request.user.login }}"
+          else
+            SUBMITTER="${{ inputs.submitter }}"
+          fi
+
+          if [ -z "$SUBMITTER" ]; then
+            echo "Submitter is required."
+            exit 1
+          fi
+
+          echo "SUBMITTER=$SUBMITTER" >> "$GITHUB_ENV"
+          echo "TARGET_DIR=02-week/$SUBMITTER" >> "$GITHUB_ENV"
+
+      - name: check submitter directory exists
+        run: |
+          if [ ! -d "$TARGET_DIR" ]; then
+            echo "Submission directory not found: $TARGET_DIR"
+            exit 1
+          fi
+
+      - name: restore checker cache
+        id: checker-cache
+        uses: actions/cache@v4
+        with:
+          path: 02-week/00-checker/checker
+          key: ${{ runner.os }}-02-week-checker-${{ hashFiles('02-week/00-checker/go.mod', '02-week/00-checker/go.sum', '02-week/00-checker/*.go', '02-week/00-checker/Makefile') }}
+
+      - name: build checker
+        if: steps.checker-cache.outputs.cache-hit != 'true'
+        run: make build
+        working-directory: 02-week/00-checker
+
+      - name: restore echoserver cache
+        id: echoserver-cache
+        uses: actions/cache@v4
+        with:
+          path: 02-week/01-echoserver/echoserver
+          key: ${{ runner.os }}-02-week-echoserver-${{ hashFiles('02-week/01-echoserver/go.mod', '02-week/01-echoserver/*.go', '02-week/01-echoserver/Makefile') }}
+
+      - name: build echoserver
+        if: steps.echoserver-cache.outputs.cache-hit != 'true'
+        run: make build
+        working-directory: 02-week/01-echoserver
+
+      - name: build submission
+        run: |
+          cd "$TARGET_DIR"
+          make build
+
+          if [ ! -f "./app" ]; then
+            echo "Build output not found: $TARGET_DIR/app"
+            exit 1
+          fi
+
+      - name: prepare test environment
+        run: |
+          set -euo pipefail
+
+          APP_LOG="${RUNNER_TEMP}/02-week-app.log"
+          RESPONSE_DIR="${RUNNER_TEMP}/02-week-responses"
+          mkdir -p "$RESPONSE_DIR"
+
+          NETNS_NAME="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          HOST_IF="vethci0"
+          PEER_IF="eth0"
+          HOST_IP="10.10.0.1/24"
+          PEER_IP="10.10.0.2/24"
+          PEER_ADDR="10.10.0.2"
+          CHECKER="${GITHUB_WORKSPACE}/02-week/00-checker/checker"
+          ECHOSERVER="${GITHUB_WORKSPACE}/02-week/01-echoserver/echoserver"
+
+          echo "APP_LOG=$APP_LOG" >> "$GITHUB_ENV"
+          echo "RESPONSE_DIR=$RESPONSE_DIR" >> "$GITHUB_ENV"
+          echo "NETNS_NAME=$NETNS_NAME" >> "$GITHUB_ENV"
+          echo "HOST_IF=$HOST_IF" >> "$GITHUB_ENV"
+          echo "PEER_IF=$PEER_IF" >> "$GITHUB_ENV"
+          echo "HOST_IP=$HOST_IP" >> "$GITHUB_ENV"
+          echo "PEER_IP=$PEER_IP" >> "$GITHUB_ENV"
+          echo "PEER_ADDR=$PEER_ADDR" >> "$GITHUB_ENV"
+          echo "CHECKER=$CHECKER" >> "$GITHUB_ENV"
+          echo "ECHOSERVER=$ECHOSERVER" >> "$GITHUB_ENV"
+
+      - name: start submission app
+        run: |
+          set -euo pipefail
+
+          cd "$TARGET_DIR"
+          sudo timeout 90s ./app >"$APP_LOG" 2>&1 &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> "$GITHUB_ENV"
+          cd "$GITHUB_WORKSPACE"
+
+          APP_READY=0
+          for _ in $(seq 1 30); do
+            if curl -sS -o /dev/null http://127.0.0.1:8080/ >/dev/null 2>&1; then
+              APP_READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$APP_READY" -ne 1 ]; then
+            echo "Submission app did not start listening on 127.0.0.1:8080."
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+          if ! kill -0 "$APP_PID" >/dev/null 2>&1; then
+            echo "Submission app exited before tests started."
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+      - name: validate netns
+        run: |
+          set -euo pipefail
+
+          if ! curl -fsS -X POST http://127.0.0.1:8080/netns \
+            -H 'Content-Type: application/json' \
+            -d "{\"name\":\"${NETNS_NAME}\"}" \
+            -o "${RESPONSE_DIR}/netns.json"; then
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+          if ! sudo "$CHECKER" netns --name "$NETNS_NAME"; then
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+      - name: validate veth
+        run: |
+          set -euo pipefail
+
+          if ! curl -fsS -X POST "http://127.0.0.1:8080/netns/${NETNS_NAME}/veth" \
+            -H 'Content-Type: application/json' \
+            -d "{\"host_ifname\":\"${HOST_IF}\",\"peer_ifname\":\"${PEER_IF}\",\"host_ip\":\"${HOST_IP}\",\"peer_ip\":\"${PEER_IP}\"}" \
+            -o "${RESPONSE_DIR}/veth.json"; then
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+          if ! sudo "$CHECKER" veth \
+            --name "$NETNS_NAME" \
+            --host-ifname "$HOST_IF" \
+            --peer-ifname "$PEER_IF" \
+            --host-ip "$HOST_IP" \
+            --peer-ip "$PEER_IP"; then
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+      - name: validate server execution
+        run: |
+          set -euo pipefail
+
+          if ! curl -fsS -X POST "http://127.0.0.1:8080/netns/${NETNS_NAME}/exec" \
+            -H 'Content-Type: application/json' \
+            -d "{\"path\":\"${ECHOSERVER}\",\"args\":[]}" \
+            -o "${RESPONSE_DIR}/exec.json"; then
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+          CHILD_PID="$(jq -r '.child_pid // empty' "${RESPONSE_DIR}/exec.json")"
+          if [ -z "$CHILD_PID" ] || [ "$CHILD_PID" = "null" ]; then
+            echo "child_pid not found in exec response."
+            cat "${RESPONSE_DIR}/exec.json"
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+          if ! sudo "$CHECKER" server \
+            --name "$NETNS_NAME" \
+            --pid "$CHILD_PID" \
+            --listen-ip "$PEER_ADDR"; then
+            echo "==== app log ===="
+            cat "$APP_LOG" || true
+            exit 1
+          fi
+
+      - name: cleanup test resources
+        if: always()
+        run: |
+          set +e
+          sudo ip netns delete "$NETNS_NAME" >/dev/null 2>&1
+          sudo ip link delete "$HOST_IF" >/dev/null 2>&1
+          if [ -n "${APP_PID:-}" ]; then
+            sudo kill "$APP_PID" >/dev/null 2>&1
+            wait "$APP_PID" >/dev/null 2>&1
+          fi
