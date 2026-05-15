@@ -202,10 +202,7 @@ func createNamedNetns(name string) (string, error) {
 			return path, nil
 		}
 
-		// path는 존재하지만 nsfs mount가 아니라면 실패 처리
-		if err := os.Remove(path); err != nil {
-			return "", fmt.Errorf("failed to remove stale netns path: %w", err)
-		}
+		return "", fmt.Errorf("netns path already exists but is not nsfs mount: %s", path)
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("failed to stat netns path: %w", err)
 	}
@@ -216,20 +213,22 @@ func createNamedNetns(name string) (string, error) {
 	}
 	_ = f.Close()
 
-	// network namespace 변경은 프로세스 전체가 아니라 스레드 단위로 적용된다.
-	// Go runtime이 goroutine을 다른 스레드로 옮기지 않도록 현재 스레드에 고정한다.
+	// network namespace 변경은 프로세스 전체가 아니라 OS thread 단위로 적용된다.
+	// Go runtime이 goroutine을 다른 thread로 옮기지 않도록 현재 thread에 고정한다.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	originNS, err := netns.Get()
 	if err != nil {
+		_ = os.Remove(path)
 		return "", fmt.Errorf("failed to get origin netns: %w", err)
 	}
 	defer originNS.Close()
 
-	// netns.New()는 새 network namespace를 만들고 현재 스레드를 그 namespace로 이동시킨다.
+	// netns.New()는 새 network namespace를 만들고 현재 thread를 그 namespace로 이동시킨다.
 	newNS, err := netns.New()
 	if err != nil {
+		_ = os.Remove(path)
 		return "", fmt.Errorf("failed to create new network namespace: %w", err)
 	}
 	defer newNS.Close()
@@ -238,9 +237,10 @@ func createNamedNetns(name string) (string, error) {
 		_ = netns.Set(originNS)
 	}()
 
-	// 현재 스레드는 새 namespace 안에 있으므로 /proc/self/ns/net은 새 netns를 가리킨다.
+	// 현재 thread는 새 namespace 안에 있으므로 /proc/self/ns/net은 새 netns를 가리킨다.
 	// 이를 /run/netns/{name}에 bind mount 해야 checker가 named namespace로 인식할 수 있다.
 	if err := unix.Mount("/proc/self/ns/net", path, "", unix.MS_BIND, ""); err != nil {
+		_ = netns.Set(originNS)
 		_ = os.Remove(path)
 		return "", fmt.Errorf("failed to bind mount named netns: %w", err)
 	}
@@ -256,25 +256,29 @@ func createVeth(name string, req createVethRequest) error {
 	defer targetNS.Close()
 
 	if oldHost, err := netlink.LinkByName(req.HostIfname); err == nil {
-		_ = netlink.LinkDel(oldHost)
+		if err := netlink.LinkDel(oldHost); err != nil {
+			return fmt.Errorf("failed to delete existing host link %s: %w", req.HostIfname, err)
+		}
 		time.Sleep(100 * time.Millisecond)
+	} else if !isNotFound(err) {
+		return fmt.Errorf("failed to lookup existing host link %s: %w", req.HostIfname, err)
 	}
 
-	_ = withNetns(targetNS, func() error {
-		if oldPeer, err := netlink.LinkByName(req.PeerIfname); err == nil {
-			_ = netlink.LinkDel(oldPeer)
-			time.Sleep(100 * time.Millisecond)
-		}
-		return nil
-	})
+	if err := withNetns(targetNS, func() error {
+		return deleteLinkIfExists(req.PeerIfname)
+	}); err != nil {
+		return err
+	}
 
-	// peer 이름을 바로 eth0로 만들면 host namespace의 eth0와 충돌할 수 있다.
-	// 그래서 임시 이름으로 만든 뒤 target namespace 안에서 최종 이름으로 변경한다.
 	tmpPeerName := makeTempPeerName(req.HostIfname)
 
 	if oldTmp, err := netlink.LinkByName(tmpPeerName); err == nil {
-		_ = netlink.LinkDel(oldTmp)
+		if err := netlink.LinkDel(oldTmp); err != nil {
+			return fmt.Errorf("failed to delete existing temporary peer link %s: %w", tmpPeerName, err)
+		}
 		time.Sleep(100 * time.Millisecond)
+	} else if !isNotFound(err) {
+		return fmt.Errorf("failed to lookup existing temporary peer link %s: %w", tmpPeerName, err)
 	}
 
 	veth := &netlink.Veth{
@@ -316,12 +320,16 @@ func createVeth(name string, req createVethRequest) error {
 		return fmt.Errorf("failed to set host veth up: %w", err)
 	}
 
-	// peer veth는 이미 target namespace 안으로 이동했으므로,
-	// 이름 변경, IP 설정, link up 작업은 target namespace 안에서 수행해야 한다.
 	if err := withNetns(targetNS, func() error {
 		peerLink, err := netlink.LinkByName(tmpPeerName)
 		if err != nil {
 			return fmt.Errorf("failed to find peer veth in named netns: %w", err)
+		}
+
+		// rename 직전에도 한 번 더 확인한다.
+		// 이전 실행 흔적으로 eth0가 남아 있으면 LinkSetName이 file exists로 실패한다.
+		if err := deleteLinkIfExists(req.PeerIfname); err != nil {
+			return err
 		}
 
 		if err := netlink.LinkSetName(peerLink, req.PeerIfname); err != nil {
@@ -371,7 +379,7 @@ func execInNetns(name string, req execRequest) (int, int, error) {
 	}
 	defer targetNS.Close()
 
-	// netns.Set()도 현재 스레드에 적용되므로 thread를 고정한다.
+	// netns.Set()도 현재 OS thread에 적용되므로 thread를 고정한다.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -389,7 +397,7 @@ func execInNetns(name string, req execRequest) (int, int, error) {
 		_ = netns.Set(originNS)
 	}()
 
-	// 현재 스레드가 target namespace 안에 있는 상태에서 프로세스를 시작한다.
+	// 현재 thread가 target namespace 안에 있는 상태에서 프로세스를 시작한다.
 	// 따라서 생성된 child process는 target namespace 안에서 실행된다.
 	cmd := exec.Command(req.Path, req.Args...)
 	cmd.Stdout = os.Stdout
@@ -430,6 +438,24 @@ func withNetns(targetNS netns.NsHandle, fn func() error) error {
 	return fn()
 }
 
+func deleteLinkIfExists(name string) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+
+		return fmt.Errorf("failed to lookup link %s: %w", name, err)
+	}
+
+	if err := netlink.LinkDel(link); err != nil {
+		return fmt.Errorf("failed to delete existing link %s: %w", name, err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	return nil
+}
+
 func parseNetnsAction(path string) (string, string, error) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) != 3 || parts[0] != "netns" {
@@ -459,7 +485,7 @@ func makeTempPeerName(hostIfname string) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(hostIfname))
 
-	// Linux interface name 15자 제한으로 짧은 prefix와 hash를 사용한다.
+	// Linux interface name은 15자 제한이 있으므로 짧은 prefix와 hash를 사용한다.
 	return fmt.Sprintf("tmp%x", h.Sum32())
 }
 
@@ -483,6 +509,18 @@ func isAlreadyExists(err error) bool {
 		strings.Contains(msg, "object already exists")
 }
 
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no such network interface") ||
+		strings.Contains(msg, "link not found")
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -490,5 +528,6 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
+	log.Printf("request failed: status=%d error=%s", status, msg)
 	writeJSON(w, status, errorResponse{Error: msg})
 }
