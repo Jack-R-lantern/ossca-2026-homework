@@ -12,6 +12,8 @@ import (
 
 const listenAddr = ":8080"
 
+// service는 HTTP handler와 Linux namespace 구현을 분리한다.
+// handler는 요청/응답만 다루고, 실제 netns/veth/exec 작업은 service_linux.go에서 처리한다.
 type service interface {
 	CreateNetns(name string) (string, error)
 	CreateVeth(name string, req vethRequest) (vethResponse, error)
@@ -79,6 +81,7 @@ func main() {
 func newHandler(svc service) http.Handler {
 	a := &app{service: svc}
 
+	// "/"는 서버가 정상적으로 떠 있는지 확인하기 위한 간단한 상태 확인 endpoint다.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleRoot)
 	mux.HandleFunc("/netns", a.handleNetns)
@@ -97,6 +100,8 @@ func (a *app) handleNetns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /netns는 named network namespace의 이름만 받는다.
+	// 실제 생성과 bind mount는 Linux 전용 service 구현에서 수행한다.
 	var req createNetnsRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -126,6 +131,7 @@ func (a *app) handleNetnsAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /netns/{name}/veth 또는 /netns/{name}/exec 형태만 허용한다.
 	name, action, err := parseNetnsAction(r.URL.Path)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not found")
@@ -148,6 +154,8 @@ func (a *app) handleNetnsAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleVeth(w http.ResponseWriter, r *http.Request, name string) {
+	// veth API는 host 쪽 interface와 namespace 쪽 interface 설정값을 한 번에 받는다.
+	// route, bridge, NAT는 과제 범위가 아니므로 여기서 다루지 않는다.
 	var req vethRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -169,6 +177,8 @@ func (a *app) handleVeth(w http.ResponseWriter, r *http.Request, name string) {
 }
 
 func (a *app) handleExec(w http.ResponseWriter, r *http.Request, name string) {
+	// exec API는 이미 만들어진 named namespace 안에서 새 프로세스를 시작한다.
+	// echoserver 검증에서는 이 child_pid를 checker가 다시 확인한다.
 	var req execRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -191,6 +201,7 @@ func (a *app) handleExec(w http.ResponseWriter, r *http.Request, name string) {
 
 func decodeJSON(r *http.Request, v any) error {
 	decoder := json.NewDecoder(r.Body)
+	// 과제에서 정의하지 않은 필드가 들어오면 잘못된 요청으로 처리한다.
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(v); err != nil {
 		return err
@@ -213,6 +224,7 @@ func validateName(name string) error {
 		return errors.New("name is required")
 	}
 
+	// name은 /var/run/netns/{name} 파일명으로 쓰이므로 경로 문자를 막는다.
 	if strings.Contains(name, "/") || strings.Contains(name, "..") {
 		return errors.New("name must not contain / or ..")
 	}

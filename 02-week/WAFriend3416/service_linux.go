@@ -24,6 +24,8 @@ func newService() service {
 	return linuxService{}
 }
 
+// CreateNetns는 1주차의 unshare 흐름을 named namespace 생성으로 확장한다.
+// 새 network namespace를 만든 뒤 /var/run/netns/{name}에 bind mount해서 이름으로 다시 열 수 있게 한다.
 func (linuxService) CreateNetns(name string) (path string, err error) {
 	path = netnsPath(name)
 
@@ -31,6 +33,7 @@ func (linuxService) CreateNetns(name string) (path string, err error) {
 		return "", fmt.Errorf("create netns dir: %w", err)
 	}
 
+	// 같은 이름의 namespace가 이미 nsfs mount라면 반복 호출을 성공으로 본다.
 	if _, err := os.Stat(path); err == nil {
 		if isNSFSMount(path) {
 			return path, nil
@@ -49,11 +52,14 @@ func (linuxService) CreateNetns(name string) (path string, err error) {
 
 	createdMountPoint := true
 	defer func() {
+		// mount 전에 실패했다면 빈 mount point 파일만 정리한다.
 		if err != nil && createdMountPoint {
 			_ = os.Remove(path)
 		}
 	}()
 
+	// unshare와 setns는 현재 OS thread에 적용된다.
+	// Go runtime이 goroutine을 다른 thread로 옮기지 못하도록 고정한다.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -68,11 +74,14 @@ func (linuxService) CreateNetns(name string) (path string, err error) {
 	}
 
 	defer func() {
+		// 부모 HTTP 서버가 host namespace에 남아 있어야 하므로 항상 원래 netns로 복귀한다.
 		if restoreErr := setnsFile(originNS); err == nil && restoreErr != nil {
 			err = fmt.Errorf("restore original netns: %w", restoreErr)
 		}
 	}()
 
+	// 현재 thread는 새 netns에 들어와 있으므로 이 경로가 새 namespace를 가리킨다.
+	// bind mount 결과가 checker에서 nsfs mount로 보인다.
 	threadNSPath := fmt.Sprintf("/proc/self/task/%d/ns/net", unix.Gettid())
 	if err := unix.Mount(threadNSPath, path, "", unix.MS_BIND, ""); err != nil {
 		return "", fmt.Errorf("bind mount named netns: %w", err)
@@ -82,6 +91,8 @@ func (linuxService) CreateNetns(name string) (path string, err error) {
 	return path, nil
 }
 
+// CreateVeth는 host namespace에 veth pair를 만들고 peer 쪽만 named namespace로 이동한다.
+// 모든 설정은 netlink socket으로 수행하며 ip 명령어는 호출하지 않는다.
 func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, error) {
 	if err := validateIfName(req.HostIfname); err != nil {
 		return vethResponse{}, fmt.Errorf("host_ifname: %w", err)
@@ -102,6 +113,7 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 	}
 
 	path := netnsPath(name)
+	// LinkSetNsFd는 대상 namespace의 fd가 필요하다.
 	targetNS, err := os.Open(path)
 	if err != nil {
 		return vethResponse{}, fmt.Errorf("open named netns: %w", err)
@@ -121,6 +133,7 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 		return vethResponse{}, fmt.Errorf("temporary peer interface already exists: %s", tmpPeerName)
 	}
 
+	// peer_ifname은 namespace 내부에서만 보이는 이름이므로 잠시 target namespace에 들어가 확인한다.
 	if err := withNamedNetNS(path, func() error {
 		exists, err := linkExists(req.PeerIfname)
 		if err != nil {
@@ -136,6 +149,7 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 		return vethResponse{}, err
 	}
 
+	// peer는 아직 host namespace에 있으므로 임시 이름으로 만든 뒤 나중에 namespace 안에서 rename한다.
 	veth := &netlink.Veth{
 		LinkAttrs: netlink.LinkAttrs{Name: req.HostIfname},
 		PeerName:  tmpPeerName,
@@ -146,6 +160,7 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 
 	cleanup := true
 	defer func() {
+		// 중간 실패 시 host 쪽 veth를 삭제하면 peer도 같이 정리된다.
 		if cleanup {
 			cleanupHostLink(req.HostIfname)
 		}
@@ -161,10 +176,12 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 		return vethResponse{}, fmt.Errorf("lookup temporary peer veth: %w", err)
 	}
 
+	// peer link만 named namespace로 이동한다. hostLink는 host namespace에 남는다.
 	if err := netlink.LinkSetNsFd(peerLink, int(targetNS.Fd())); err != nil {
 		return vethResponse{}, fmt.Errorf("move peer veth to named netns: %w", err)
 	}
 
+	// host 쪽 IP와 UP 상태는 host namespace에서 바로 설정한다.
 	if err := netlink.AddrAdd(hostLink, hostAddr); err != nil {
 		return vethResponse{}, fmt.Errorf("add host ip: %w", err)
 	}
@@ -174,6 +191,7 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 	}
 
 	if err := withNamedNetNS(path, func() error {
+		// 여기부터는 named namespace 내부에서 peer veth와 lo를 설정한다.
 		peerLink, err := netlink.LinkByName(tmpPeerName)
 		if err != nil {
 			return fmt.Errorf("lookup peer veth in named netns: %w", err)
@@ -196,6 +214,7 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 			return fmt.Errorf("set peer veth up: %w", err)
 		}
 
+		// checker는 namespace 내부 loopback도 UP인지 확인한다.
 		loLink, err := netlink.LinkByName("lo")
 		if err != nil {
 			return fmt.Errorf("lookup loopback: %w", err)
@@ -221,6 +240,8 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 	}, nil
 }
 
+// ExecInNetns는 named namespace로 들어간 thread에서 프로세스를 Start한다.
+// Start된 child는 그 namespace를 상속하고, 부모 thread는 즉시 host namespace로 돌아온다.
 func (linuxService) ExecInNetns(name string, req execRequest) (execResponse, error) {
 	var childPID int
 
@@ -234,6 +255,7 @@ func (linuxService) ExecInNetns(name string, req execRequest) (execResponse, err
 		}
 
 		childPID = cmd.Process.Pid
+		// API 응답 후에도 child를 수거해 zombie가 남지 않게 한다.
 		go func() {
 			_ = cmd.Wait()
 		}()
@@ -258,6 +280,8 @@ func openCurrentThreadNetNS() (*os.File, error) {
 	return os.Open(fmt.Sprintf("/proc/self/task/%d/ns/net", unix.Gettid()))
 }
 
+// setnsFile은 1주차 setns syscall wrapper와 같은 역할을 한다.
+// 여기서는 x/sys/unix의 Setns를 사용해 현재 thread의 network namespace를 바꾼다.
 func setnsFile(file *os.File) error {
 	return unix.Setns(int(file.Fd()), unix.CLONE_NEWNET)
 }
@@ -271,6 +295,8 @@ func isNSFSMount(path string) bool {
 	return stat.Type == unix.NSFS_MAGIC
 }
 
+// withNamedNetNS는 특정 namespace 안에서만 실행해야 하는 netlink/exec 작업을 감싼다.
+// 함수가 끝나면 성공/실패와 관계없이 원래 namespace로 복귀를 시도한다.
 func withNamedNetNS(path string, fn func() error) error {
 	targetNS, err := os.Open(path)
 	if err != nil {
@@ -304,6 +330,7 @@ func withNamedNetNS(path string, fn func() error) error {
 	return nil
 }
 
+// Linux interface name은 IFNAMSIZ 제한 때문에 실제 이름은 15자 이하여야 한다.
 func validateIfName(name string) error {
 	if name == "" {
 		return errors.New("interface name is required")
@@ -320,6 +347,7 @@ func validateIfName(name string) error {
 	return nil
 }
 
+// netlink는 존재하지 않는 interface를 조회할 때 환경별로 다른 메시지를 돌려줄 수 있다.
 func linkExists(name string) (bool, error) {
 	if _, err := netlink.LinkByName(name); err != nil {
 		if isLinkNotFound(err) {
@@ -339,6 +367,8 @@ func cleanupHostLink(name string) {
 	}
 }
 
+// tempPeerName은 host interface 이름에서 안정적인 임시 peer 이름을 만든다.
+// veth 생성 직후 peer가 host namespace에 잠깐 존재할 때 이 이름으로 찾는다.
 func tempPeerName(hostIfname string) string {
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(hostIfname))
