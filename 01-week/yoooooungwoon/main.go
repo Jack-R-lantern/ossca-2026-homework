@@ -19,15 +19,19 @@ type Response struct {
 }
 
 func handleNetns(w http.ResponseWriter, r *http.Request) {
+	runtime.LockOSThread()
+    defer runtime.UnlockOSThread()
+
 	var req Request
 	json.NewDecoder(r.Body).Decode(&req)
 
+	
+
+	if err := syscall.Unshare(syscall.CLONE_NEWNET); err != nil {
+        http.Error(w, err.Error(), 500)
+        return
+    }
 	cmd := exec.Command(req.Path, req.Args...)
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Unshareflags: syscall.CLONE_NEWNET,
-	}
-
 	cmd.Start()
 	go cmd.Wait()
 
