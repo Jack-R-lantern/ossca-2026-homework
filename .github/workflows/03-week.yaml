@@ -1,0 +1,144 @@
+name: 03-week
+
+on:
+  pull_request:
+    paths:
+      - '03-week/**'
+      - '.github/workflows/03-week.yaml'
+  workflow_dispatch:
+    inputs:
+      submitter:
+        description: 'Submitter GitHub login under 03-week/'
+        required: true
+        type: string
+      pr_number:
+        description: 'PR number to test'
+        required: true
+        type: number
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        if: github.event_name == 'pull_request'
+
+      - uses: actions/checkout@v6
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/head
+
+      - name: resolve submitter directory
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SUBMITTER="${{ github.event.pull_request.user.login }}"
+          else
+            SUBMITTER="${{ inputs.submitter }}"
+          fi
+
+          if [ -z "$SUBMITTER" ]; then
+            echo "Submitter is required."
+            exit 1
+          fi
+
+          echo "SUBMITTER=$SUBMITTER" >> "$GITHUB_ENV"
+          echo "TARGET_DIR=03-week/$SUBMITTER" >> "$GITHUB_ENV"
+          echo "GO_VERSION_FILE=03-week/$SUBMITTER/go.mod" >> "$GITHUB_ENV"
+
+      - name: check submitter directory exists
+        run: |
+          if [ ! -d "$TARGET_DIR" ]; then
+            echo "Submission directory not found: $TARGET_DIR"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+
+      - name: restore checker cache
+        id: checker-cache
+        uses: actions/cache@v4
+        with:
+          path: 03-week/00-checker/checker
+          key: ${{ runner.os }}-03-week-checker-${{ hashFiles('03-week/00-checker/go.mod', '03-week/00-checker/*.go', '03-week/00-checker/Makefile') }}
+
+      - name: build checker
+        if: steps.checker-cache.outputs.cache-hit != 'true'
+        run: make build
+        working-directory: 03-week/00-checker
+
+      - name: build submission
+        run: |
+          cd "$TARGET_DIR"
+          make build
+
+          if [ ! -f "./app" ]; then
+            echo "Build output not found: $TARGET_DIR/app"
+            exit 1
+          fi
+
+      - name: prepare test environment
+        run: |
+          set -euo pipefail
+
+          APP_LOG="${RUNNER_TEMP}/03-week-app.log"
+
+          echo "APP_LOG=$APP_LOG" >> "$GITHUB_ENV"
+
+      - name: start submission app
+        run: |
+          set -euo pipefail
+
+          cd "$TARGET_DIR"
+          sudo timeout 120s ./app >"$APP_LOG" 2>&1 &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> "$GITHUB_ENV"
+          cd "$GITHUB_WORKSPACE"
+
+          APP_READY=0
+          for _ in $(seq 1 30); do
+            if curl -sS -o /dev/null http://127.0.0.1:8080/ >/dev/null 2>&1; then
+              APP_READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$APP_READY" -ne 1 ]; then
+            echo "Submission app did not start listening on 127.0.0.1:8080."
+            exit 1
+          fi
+
+          if ! kill -0 "$APP_PID" >/dev/null 2>&1; then
+            echo "Submission app exited before tests started."
+            exit 1
+          fi
+
+      - name: validate xdp scenario
+        run: |
+          set -euo pipefail
+
+          sudo "${GITHUB_WORKSPACE}/03-week/00-checker/checker" \
+            --server-url http://127.0.0.1:8080 \
+            --namespace "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --host-ifname "vethxdp0" \
+            --peer-ifname "eth0" \
+            --host-ip "10.20.0.1/24" \
+            --peer-ip "10.20.0.2/24"
+
+      - name: dump app log on failure
+        if: failure()
+        run: |
+          if [ -f "$APP_LOG" ]; then
+            echo "==== app log ===="
+            cat "$APP_LOG"
+          fi
+
+      - name: cleanup app
+        if: always()
+        run: |
+          if [ -n "${APP_PID:-}" ]; then
+            sudo kill "$APP_PID" 2>/dev/null || true
+          fi
