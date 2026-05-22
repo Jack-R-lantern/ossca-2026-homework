@@ -124,3 +124,70 @@ func TestHandleNetnsPropagatesServiceError(t *testing.T) {
 		t.Fatalf("status=%d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 }
+
+func TestHandleVethRejectsMissingFields(t *testing.T) {
+	svc := &fakeService{}
+	req := httptest.NewRequest(http.MethodPost, "/netns/test-01/veth", bytes.NewBufferString(`{"host_ifname":"veth0"}`))
+	rec := httptest.NewRecorder()
+
+	newHandler(svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleVethCreatesPair(t *testing.T) {
+	svc := &fakeService{
+		vethResp: vethResponse{
+			Name:       "test-01",
+			HostIfname: "veth-test01",
+			PeerIfname: "eth0",
+			HostIP:     "10.10.0.1/24",
+			PeerIP:     "10.10.0.2/24",
+			NetnsPath:  "/var/run/netns/test-01",
+		},
+	}
+	body := `{"host_ifname":"veth-test01","peer_ifname":"eth0","host_ip":"10.10.0.1/24","peer_ip":"10.10.0.2/24"}`
+	req := httptest.NewRequest(http.MethodPost, "/netns/test-01/veth", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+
+	newHandler(svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	if svc.vethName != "test-01" {
+		t.Fatalf("CreateVeth name=%q, want %q", svc.vethName, "test-01")
+	}
+
+	if svc.vethReq.HostIfname != "veth-test01" ||
+		svc.vethReq.PeerIfname != "eth0" ||
+		svc.vethReq.HostIP != "10.10.0.1/24" ||
+		svc.vethReq.PeerIP != "10.10.0.2/24" {
+		t.Fatalf("CreateVeth request=%+v", svc.vethReq)
+	}
+
+	var resp vethResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if resp != svc.vethResp {
+		t.Fatalf("response=%+v, want %+v", resp, svc.vethResp)
+	}
+}
+
+func TestHandleVethPropagatesServiceError(t *testing.T) {
+	svc := &fakeService{vethErr: errors.New("boom")}
+	body := `{"host_ifname":"veth-test01","peer_ifname":"eth0","host_ip":"10.10.0.1/24","peer_ip":"10.10.0.2/24"}`
+	req := httptest.NewRequest(http.MethodPost, "/netns/test-01/veth", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+
+	newHandler(svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
