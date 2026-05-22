@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -220,8 +221,33 @@ func (linuxService) CreateVeth(name string, req vethRequest) (vethResponse, erro
 	}, nil
 }
 
-func (linuxService) ExecInNetns(string, execRequest) (execResponse, error) {
-	return execResponse{}, errors.New("exec API is not implemented yet")
+func (linuxService) ExecInNetns(name string, req execRequest) (execResponse, error) {
+	var childPID int
+
+	if err := withNamedNetNS(netnsPath(name), func() error {
+		cmd := exec.Command(req.Path, req.Args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start process in named netns: %w", err)
+		}
+
+		childPID = cmd.Process.Pid
+		go func() {
+			_ = cmd.Wait()
+		}()
+
+		return nil
+	}); err != nil {
+		return execResponse{}, err
+	}
+
+	return execResponse{
+		Name:      name,
+		ParentPID: currentPID(),
+		ChildPID:  childPID,
+	}, nil
 }
 
 func netnsPath(name string) string {

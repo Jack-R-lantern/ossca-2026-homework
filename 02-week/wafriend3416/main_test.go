@@ -191,3 +191,62 @@ func TestHandleVethPropagatesServiceError(t *testing.T) {
 		t.Fatalf("status=%d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 }
+
+func TestHandleExecRejectsMissingPath(t *testing.T) {
+	svc := &fakeService{}
+	req := httptest.NewRequest(http.MethodPost, "/netns/test-01/exec", bytes.NewBufferString(`{"args":[]}`))
+	rec := httptest.NewRecorder()
+
+	newHandler(svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleExecRunsProcess(t *testing.T) {
+	svc := &fakeService{
+		execResp: execResponse{
+			Name:      "test-01",
+			ParentPID: 100,
+			ChildPID:  101,
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/netns/test-01/exec", bytes.NewBufferString(`{"path":"/bin/sleep","args":["30"]}`))
+	rec := httptest.NewRecorder()
+
+	newHandler(svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	if svc.execName != "test-01" {
+		t.Fatalf("ExecInNetns name=%q, want %q", svc.execName, "test-01")
+	}
+
+	if svc.execReq.Path != "/bin/sleep" || len(svc.execReq.Args) != 1 || svc.execReq.Args[0] != "30" {
+		t.Fatalf("ExecInNetns request=%+v", svc.execReq)
+	}
+
+	var resp execResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if resp != svc.execResp {
+		t.Fatalf("response=%+v, want %+v", resp, svc.execResp)
+	}
+}
+
+func TestHandleExecPropagatesServiceError(t *testing.T) {
+	svc := &fakeService{execErr: errors.New("boom")}
+	req := httptest.NewRequest(http.MethodPost, "/netns/test-01/exec", bytes.NewBufferString(`{"path":"/bin/sleep","args":["30"]}`))
+	rec := httptest.NewRecorder()
+
+	newHandler(svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
