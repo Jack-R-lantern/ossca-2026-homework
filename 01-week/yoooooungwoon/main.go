@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"runtime"
 )
 
 type Request struct {
@@ -24,8 +25,6 @@ func handleNetns(w http.ResponseWriter, r *http.Request) {
 
 	var req Request
 	json.NewDecoder(r.Body).Decode(&req)
-
-	
 
 	if err := syscall.Unshare(syscall.CLONE_NEWNET); err != nil {
         http.Error(w, err.Error(), 500)
