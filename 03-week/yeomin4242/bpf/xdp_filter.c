@@ -10,6 +10,8 @@ typedef unsigned int __u32;
 #define XDP_PASS 2
 #define XDP_DROP 1
 #define ETH_P_IP 0x0800
+#define ETH_P_8021Q 0x8100
+#define ETH_P_8021AD 0x88A8
 
 struct xdp_md {
 	__u32 data;
@@ -39,6 +41,11 @@ struct ipv4hdr {
 	__u32 destination;
 };
 
+struct vlanhdr {
+	__u16 tci;
+	__u16 proto;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
@@ -59,11 +66,36 @@ int xdp_block_ipv4(struct xdp_md *ctx)
 		return XDP_PASS;
 	}
 
-	if (eth->h_proto != __builtin_bswap16(ETH_P_IP)) {
+	__u16 proto = eth->h_proto;
+	void *cursor = eth + 1;
+
+	if (proto == __builtin_bswap16(ETH_P_8021Q) ||
+	    proto == __builtin_bswap16(ETH_P_8021AD)) {
+		struct vlanhdr *vlan = cursor;
+		if ((void *)(vlan + 1) > data_end) {
+			return XDP_PASS;
+		}
+
+		proto = vlan->proto;
+		cursor = vlan + 1;
+	}
+
+	if (proto == __builtin_bswap16(ETH_P_8021Q) ||
+	    proto == __builtin_bswap16(ETH_P_8021AD)) {
+		struct vlanhdr *vlan = cursor;
+		if ((void *)(vlan + 1) > data_end) {
+			return XDP_PASS;
+		}
+
+		proto = vlan->proto;
+		cursor = vlan + 1;
+	}
+
+	if (proto != __builtin_bswap16(ETH_P_IP)) {
 		return XDP_PASS;
 	}
 
-	struct ipv4hdr *ip = (void *)(eth + 1);
+	struct ipv4hdr *ip = cursor;
 	if ((void *)(ip + 1) > data_end) {
 		return XDP_PASS;
 	}

@@ -1,4 +1,4 @@
-.PHONY: build clean
+.PHONY: build clean FORCE
 
 APP := app
 BPF_SRC := bpf/xdp_filter.c
@@ -10,7 +10,7 @@ LLVM_STRIP ?= $(firstword $(wildcard /opt/homebrew/opt/llvm/bin/llvm-strip) $(sh
 build: $(BPF_OBJ)
 	go build -o $(APP) .
 
-$(BPF_OBJ): $(BPF_SRC)
+$(BPF_OBJ): $(BPF_SRC) FORCE
 	@test -n "$(CLANG)" || (echo "clang is required to build the eBPF object" >&2; exit 1)
 	$(CLANG) -O2 -g -target bpfel -c $(BPF_SRC) -o $(BPF_OBJ)
 	@if [ -n "$(LLVM_STRIP)" ]; then $(LLVM_STRIP) -g $(BPF_OBJ); fi

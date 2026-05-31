@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -16,7 +15,7 @@ func (m *bpfManager) handleAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req attachRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid json body: %v", err))
 		return
 	}
@@ -51,7 +50,7 @@ func (m *bpfManager) handleBlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req blockRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid json body: %v", err))
 		return
 	}
