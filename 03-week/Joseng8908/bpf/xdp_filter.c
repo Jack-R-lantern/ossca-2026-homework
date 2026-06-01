@@ -3,8 +3,19 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_endian.h>
+
+/* Inline definitions — avoids libbpf-dev dependency on the build host */
+#define SEC(NAME)         __attribute__((section(NAME), used))
+#define __uint(name, val) int (*name)[val]
+#define __type(name, val) typeof(val) *name
+
+static void *(*bpf_map_lookup_elem)(void *map, const void *key) =
+	(void *)BPF_FUNC_map_lookup_elem;
+
+static __always_inline __u16 bpf_htons(__u16 val)
+{
+	return (__u16)__builtin_bswap16(val);
+}
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
