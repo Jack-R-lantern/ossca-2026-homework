@@ -6,7 +6,7 @@ STRIP_FLAG := $(if $(LLVM_STRIP),-strip $(LLVM_STRIP))
 .PHONY: generate build run clean
 
 generate:
-	$(BPF2GO) -cc clang $(STRIP_FLAG) xdpFilter ./bpf/xdp_filter.c
+	$(BPF2GO) -cc clang $(STRIP_FLAG) -package main xdpFilter ./bpf/xdp_filter.c
 
 build: generate
 	go build -o $(BINARY) .
